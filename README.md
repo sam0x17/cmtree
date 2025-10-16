@@ -28,7 +28,7 @@ and proofs remain compact.
   `O(log n)` time, with hash ordering that matches the research paper.
 - 🧵 **No-std first** – uses `alloc` only; works in embedded and wasm contexts.
 - 🧩 **Pluggable hashers** – swap `Sha256` for any `Digest + Clone` such as `blake3` or `sha3`.
-- 🧪 **Battle-tested** – extensive unit, doc, and large-structure tests plus a CI pipeline
+- 🧪 **Tested** – extensive unit, doc, and large-structure tests plus a CI pipeline
   covering `cargo fmt`, `clippy`, `doc`, and `test`.
 
 ## Quick start
