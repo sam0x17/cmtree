@@ -39,10 +39,10 @@ cmtree = "0.1"
 ```
 
 ```rust
-use cmtree::CartesianMerkleTree;
+use cmtree::CMTree;
 
 fn main() {
-    let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+    let mut tree = CMTree::<Vec<u8>>::new();
 
     tree.insert(b"alice".to_vec());
     tree.insert(b"bob".to_vec());
@@ -59,9 +59,9 @@ fn main() {
 ## Working with proofs
 
 ```rust
-use cmtree::CartesianMerkleTree;
+use cmtree::CMTree;
 
-let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+let mut tree = CMTree::<Vec<u8>>::new();
 for key in [b"x".to_vec(), b"y".to_vec(), b"z".to_vec()] {
     tree.insert(key);
 }
@@ -95,8 +95,8 @@ ensures priorities act like random values, maintaining balance with high probabi
 
 ## Customization
 
-- **Alternative digests** – instantiate `CartesianMerkleTree::<Vec<u8>, sha3::Sha3_256>::new()`
-  or any `Digest + Clone`.
+- **Alternative digests** – instantiate `CMTree::<Vec<u8>, sha3::Sha3_256>::new()` or any
+  `Digest + Clone`.
 - **Generic keys** – keys only need `Clone + Ord + Hash`; the tree hashes them into priorities
   and Merkle payloads.
 - **No-std environments** – enable `alloc`, disable default features of your digest crate if

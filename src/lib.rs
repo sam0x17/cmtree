@@ -32,7 +32,7 @@ use core::hash::{Hash, Hasher};
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
 
-/// Digest output for the default [`Sha256`] hasher used by [`CartesianMerkleTree`].
+/// Digest output for the default [`Sha256`] hasher used by [`CMTree`].
 pub type Sha256Hash = Output<Sha256>;
 
 type HashOf<H> = Output<H>;
@@ -56,6 +56,7 @@ where
     T: Clone + Ord + Hash,
     H: Digest + Clone,
 {
+    #[inline(always)]
     fn new(key: T) -> Self {
         let key_digest = hash_key::<T, H>(&key);
         let priority = leading_u128(key_digest.as_ref());
@@ -71,6 +72,7 @@ where
         }
     }
 
+    #[inline(always)]
     fn left_hash(&self) -> HashOf<H> {
         self.left
             .as_ref()
@@ -78,6 +80,7 @@ where
             .unwrap_or_else(|| zero_hash::<H>())
     }
 
+    #[inline(always)]
     fn right_hash(&self) -> HashOf<H> {
         self.right
             .as_ref()
@@ -85,6 +88,7 @@ where
             .unwrap_or_else(|| zero_hash::<H>())
     }
 
+    #[inline(always)]
     fn left_priority(&self) -> u128 {
         self.left
             .as_ref()
@@ -92,6 +96,7 @@ where
             .unwrap_or_default()
     }
 
+    #[inline(always)]
     fn right_priority(&self) -> u128 {
         self.right
             .as_ref()
@@ -99,10 +104,12 @@ where
             .unwrap_or_default()
     }
 
+    #[inline(always)]
     fn key_digest(&self) -> &HashOf<H> {
         &self.key_digest
     }
 
+    #[inline(always)]
     fn update_hash(&mut self) {
         let left = self.left_hash();
         let right = self.right_hash();
@@ -132,9 +139,9 @@ where
 /// Basic insertion and membership proof verification:
 ///
 /// ```
-/// use cmtree::CartesianMerkleTree;
+/// use cmtree::CMTree;
 ///
-/// let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+/// let mut tree = CMTree::<Vec<u8>>::new();
 /// tree.insert(b"alice".to_vec());
 /// tree.insert(b"bob".to_vec());
 /// tree.insert(b"carol".to_vec());
@@ -145,7 +152,7 @@ where
 /// assert!(proof.existence);
 /// assert!(proof.verify(&b"bob".to_vec(), &root));
 /// ```
-pub struct CartesianMerkleTree<T, H = Sha256>
+pub struct CMTree<T, H = Sha256>
 where
     T: Clone + Ord + Hash,
     H: Digest + Clone,
@@ -154,12 +161,13 @@ where
     size: usize,
 }
 
-impl<T, H> CartesianMerkleTree<T, H>
+impl<T, H> CMTree<T, H>
 where
     T: Clone + Ord + Hash,
     H: Digest + Clone,
 {
     /// Creates an empty Cartesian Merkle Tree.
+    #[inline(always)]
     pub const fn new() -> Self {
         Self {
             root: None,
@@ -168,11 +176,13 @@ where
     }
 
     /// Returns the number of keys stored in the tree.
+    #[inline(always)]
     pub const fn len(&self) -> usize {
         self.size
     }
 
     /// Returns whether the tree contains no elements.
+    #[inline(always)]
     pub const fn is_empty(&self) -> bool {
         self.size == 0
     }
@@ -180,6 +190,7 @@ where
     /// Returns the current Merkle root of the tree.
     ///
     /// When the tree is empty the zero hash of the digest is returned.
+    #[inline(always)]
     pub fn root_hash(&self) -> HashOf<H> {
         self.root
             .as_ref()
@@ -190,6 +201,7 @@ where
     /// Inserts a key into the tree.
     ///
     /// Returns `true` if the key did not previously exist.
+    #[inline]
     pub fn insert(&mut self, key: T) -> bool {
         let (new_root, inserted) = Self::insert_node(self.root.take(), key);
         self.root = new_root;
@@ -200,6 +212,7 @@ where
     }
 
     /// Returns `true` if the provided key exists in the tree.
+    #[inline]
     pub fn contains(&self, key: &T) -> bool {
         let mut current = self.root.as_deref();
         while let Some(node) = current {
@@ -215,6 +228,7 @@ where
     /// Removes the provided key from the tree.
     ///
     /// Returns `true` if the key was present and removed.
+    #[inline]
     pub fn remove(&mut self, key: &T) -> bool {
         let (new_root, removed) = Self::remove_node(self.root.take(), key);
         if removed {
@@ -229,6 +243,7 @@ where
     /// Returns `None` when the tree is empty. For membership proofs [`Proof::existence`] is
     /// `true`. For non-membership proofs the closest node encountered during the lookup is
     /// supplied as evidence alongside the queried key's child hashes.
+    #[inline]
     pub fn generate_proof(&self, key: &T) -> Option<Proof<H>> {
         let mut current = self.root.as_deref()?;
         let mut path: Vec<(&Node<T, H>, Direction)> = Vec::new();
@@ -282,6 +297,7 @@ where
         })
     }
 
+    #[inline]
     fn insert_node(node: Link<T, H>, key: T) -> (Link<T, H>, bool) {
         match node {
             None => (Some(Box::new(Node::new(key))), true),
@@ -321,6 +337,7 @@ where
         }
     }
 
+    #[inline]
     fn remove_node(node: Link<T, H>, key: &T) -> (Link<T, H>, bool) {
         let mut boxed = match node {
             Some(node) => node,
@@ -368,6 +385,7 @@ where
         }
     }
 
+    #[inline]
     fn rotate_left_owned(mut node: Box<Node<T, H>>) -> Box<Node<T, H>> {
         let mut right = node
             .right
@@ -380,6 +398,7 @@ where
         right
     }
 
+    #[inline]
     fn rotate_right_owned(mut node: Box<Node<T, H>>) -> Box<Node<T, H>> {
         let mut left = node
             .left
@@ -393,11 +412,12 @@ where
     }
 }
 
-impl<T, H> Default for CartesianMerkleTree<T, H>
+impl<T, H> Default for CMTree<T, H>
 where
     T: Clone + Ord + Hash,
     H: Digest + Clone,
 {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
@@ -443,9 +463,9 @@ where
     /// its insertion.
     ///
     /// ```
-    /// use cmtree::CartesianMerkleTree;
+    /// use cmtree::CMTree;
     ///
-    /// let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+    /// let mut tree = CMTree::<Vec<u8>>::new();
     /// for key in [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] {
     ///     tree.insert(key);
     /// }
@@ -456,6 +476,7 @@ where
     /// assert!(proof.existence);
     /// assert!(proof.verify(&b"a".to_vec(), &root));
     /// ```
+    #[inline(always)]
     pub fn verify<K>(&self, key: &K, expected_root: &HashOf<H>) -> bool
     where
         K: Hash,
@@ -464,6 +485,7 @@ where
         self.verify_digest(&key_digest, expected_root)
     }
 
+    #[inline(always)]
     fn verify_digest(&self, key_digest: &HashOf<H>, expected_root: &HashOf<H>) -> bool {
         let base_key = if self.existence {
             key_digest
@@ -499,10 +521,12 @@ impl<H> DigestHasher<H>
 where
     H: Digest + Clone,
 {
+    #[inline(always)]
     fn new() -> Self {
         Self { digest: H::new() }
     }
 
+    #[inline(always)]
     fn finalize(self) -> HashOf<H> {
         self.digest.finalize()
     }
@@ -512,6 +536,7 @@ impl<H> Hasher for DigestHasher<H>
 where
     H: Digest + Clone,
 {
+    #[inline(always)]
     fn finish(&self) -> u64 {
         let output = self.digest.clone().finalize();
         let bytes = output.as_ref();
@@ -521,11 +546,13 @@ where
         u64::from_be_bytes(buf)
     }
 
+    #[inline(always)]
     fn write(&mut self, bytes: &[u8]) {
         self.digest.update(bytes);
     }
 }
 
+#[inline(always)]
 fn hash_key<T, H>(key: &T) -> HashOf<H>
 where
     T: Hash,
@@ -536,6 +563,7 @@ where
     hasher.finalize()
 }
 
+#[inline(always)]
 fn leading_u128(bytes: &[u8]) -> u128 {
     let mut out = [0u8; 16];
     let copy_len = min(out.len(), bytes.len());
@@ -543,10 +571,12 @@ fn leading_u128(bytes: &[u8]) -> u128 {
     u128::from_be_bytes(out)
 }
 
+#[inline(always)]
 fn zero_hash<H: Digest>() -> HashOf<H> {
     Output::<H>::default()
 }
 
+#[inline(always)]
 fn calculate_node_hash<H: Digest>(
     key_digest: &HashOf<H>,
     left: &HashOf<H>,
@@ -576,7 +606,7 @@ mod tests {
 
     #[test]
     fn insert_and_contains() {
-        let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+        let mut tree = CMTree::<Vec<u8>>::new();
         let k10 = key(b"10");
         let k5 = key(b"5");
         let k20 = key(b"20");
@@ -594,7 +624,7 @@ mod tests {
 
     #[test]
     fn remove_keys() {
-        let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+        let mut tree = CMTree::<Vec<u8>>::new();
         let k10 = key(b"10");
         let k5 = key(b"5");
         let k20 = key(b"20");
@@ -614,7 +644,7 @@ mod tests {
 
     #[test]
     fn membership_proof_verifies() {
-        let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+        let mut tree = CMTree::<Vec<u8>>::new();
         let keys = ["10", "5", "20", "18", "25"];
         for k in keys {
             let key_vec = key(k.as_bytes());
@@ -629,7 +659,7 @@ mod tests {
 
     #[test]
     fn non_membership_proof_verifies() {
-        let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+        let mut tree = CMTree::<Vec<u8>>::new();
         let keys = ["10", "5", "20", "18", "25"];
         for k in keys {
             tree.insert(key(k.as_bytes()));
@@ -643,14 +673,14 @@ mod tests {
 
     #[test]
     fn empty_tree_has_zero_root_and_no_proof() {
-        let tree = CartesianMerkleTree::<Vec<u8>>::new();
+        let tree = CMTree::<Vec<u8>>::new();
         assert_eq!(tree.root_hash(), zero_hash::<Sha256>());
         assert!(tree.generate_proof(&key(b"nonexistent")).is_none());
     }
 
     #[test]
     fn removing_missing_key_does_not_change_tree() {
-        let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+        let mut tree = CMTree::<Vec<u8>>::new();
         for k in ["1", "2", "3", "4"] {
             assert!(tree.insert(key(k.as_bytes())));
         }
@@ -661,7 +691,7 @@ mod tests {
 
     #[test]
     fn removing_root_keeps_structure_valid() {
-        let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+        let mut tree = CMTree::<Vec<u8>>::new();
         let root_key = key(b"10");
         let left_key = key(b"05");
         let right_key = key(b"20");
@@ -677,7 +707,7 @@ mod tests {
 
     #[test]
     fn duplicate_insertions_are_idempotent() {
-        let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+        let mut tree = CMTree::<Vec<u8>>::new();
         let set = ["a", "b", "c", "d", "e"];
         for k in set {
             assert!(tree.insert(key(k.as_bytes())));
@@ -692,8 +722,8 @@ mod tests {
 
     #[test]
     fn deterministic_root_for_different_insertion_orders() {
-        let mut tree_a = CartesianMerkleTree::<Vec<u8>>::new();
-        let mut tree_b = CartesianMerkleTree::<Vec<u8>>::new();
+        let mut tree_a = CMTree::<Vec<u8>>::new();
+        let mut tree_b = CMTree::<Vec<u8>>::new();
         let mut inputs: Vec<Vec<u8>> = ["alpha", "beta", "gamma", "delta", "epsilon"]
             .iter()
             .map(|s| key(s.as_bytes()))
@@ -711,7 +741,7 @@ mod tests {
 
     #[test]
     fn membership_proof_rejects_when_flag_flipped() {
-        let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+        let mut tree = CMTree::<Vec<u8>>::new();
         for k in ["left", "right", "root", "branch"] {
             tree.insert(key(k.as_bytes()));
         }
@@ -724,8 +754,8 @@ mod tests {
 
     #[test]
     fn membership_proof_rejects_with_wrong_root() {
-        let mut tree_a = CartesianMerkleTree::<Vec<u8>>::new();
-        let mut tree_b = CartesianMerkleTree::<Vec<u8>>::new();
+        let mut tree_a = CMTree::<Vec<u8>>::new();
+        let mut tree_b = CMTree::<Vec<u8>>::new();
         for k in ["1", "2", "3", "4"] {
             let vec_key = key(k.as_bytes());
             tree_a.insert(vec_key.clone());
@@ -739,7 +769,7 @@ mod tests {
 
     #[test]
     fn mutated_suffix_breaks_non_membership_proof() {
-        let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+        let mut tree = CMTree::<Vec<u8>>::new();
         for k in ["10", "5", "20", "18", "25"] {
             tree.insert(key(k.as_bytes()));
         }
@@ -755,7 +785,7 @@ mod tests {
 
     #[test]
     fn supports_integer_keys() {
-        let mut tree = CartesianMerkleTree::<u64>::new();
+        let mut tree = CMTree::<u64>::new();
         for k in [10, 5, 20, 18, 25] {
             assert!(tree.insert(k));
         }
@@ -770,7 +800,7 @@ mod tests {
     #[test]
     fn large_tree_membership_and_non_membership_proofs() {
         const COUNT: usize = 5_000;
-        let mut tree = CartesianMerkleTree::<u64>::new();
+        let mut tree = CMTree::<u64>::new();
         for value in 0u64..COUNT as u64 {
             assert!(tree.insert(value));
         }
@@ -794,7 +824,7 @@ mod tests {
     #[test]
     fn large_tree_sequential_removals() {
         const COUNT: usize = 10_000;
-        let mut tree = CartesianMerkleTree::<u64>::new();
+        let mut tree = CMTree::<u64>::new();
         for value in 0u64..COUNT as u64 {
             assert!(tree.insert(value));
         }
