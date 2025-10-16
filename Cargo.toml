@@ -1,0 +1,10 @@
+[package]
+name = "cmtree"
+version = "0.1.0"
+edition = "2024"
+authors = ["sam0x17"]
+description = "A generic Rust implementation of a Cartesian Merkle Tree"
+keywords = ["cartesian merkle tree", "merkle", "merkle tree", "data structure"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
