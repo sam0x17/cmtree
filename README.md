@@ -28,8 +28,8 @@ and proofs remain compact.
   `O(log n)` time, with hash ordering that matches the research paper.
 - 🧵 **No-std first** – uses `alloc` only; works in embedded and wasm contexts.
 - 🧩 **Pluggable hashers** – swap `Sha256` for any `Digest + Clone` such as `blake3` or `sha3`.
-- 🧪 **Tested** – extensive unit, doc, and large-structure tests plus a CI pipeline
-  covering `cargo fmt`, `clippy`, `doc`, and `test`.
+- 🧪 **Tested** – extensive unit, doc, and large-structure tests plus a CI pipeline covering
+  `cargo fmt`, `clippy`, `doc`, and `test`.
 
 ## Quick start
 
@@ -97,6 +97,9 @@ ensures priorities act like random values, maintaining balance with high probabi
 
 - **Alternative digests** – instantiate `CMTree::<Vec<u8>, sha3::Sha3_256>::new()` or any
   `Digest + Clone`.
+- **Smaller priorities** – use `CMTree::<Vec<u8>, Sha256, u64>::new()` (or any
+  [`Priority`](https://docs.rs/cmtree/latest/cmtree/trait.Priority.html) implementer) when
+  memory pressure outweighs collision resistance.
 - **Generic keys** – keys only need `Clone + Ord + Hash`; the tree hashes them into priorities
   and Merkle payloads.
 - **No-std environments** – enable `alloc`, disable default features of your digest crate if

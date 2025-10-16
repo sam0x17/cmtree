@@ -36,30 +36,57 @@ use sha2::{Digest, Sha256};
 pub type Sha256Hash = Output<Sha256>;
 
 type HashOf<H> = Output<H>;
-type Link<T, H> = Option<Box<Node<T, H>>>;
 
-struct Node<T, H>
+type Link<T, H, P> = Option<Box<Node<T, H, P>>>;
+
+/// Trait describing a priority type derived from hashed key material.
+pub trait Priority: Copy + Ord + Default {
+    /// Constructs a priority value from the provided digest bytes (big-endian).
+    fn from_digest_bytes(bytes: &[u8]) -> Self;
+}
+
+macro_rules! impl_priority_from_bytes {
+    ($($ty:ty),+) => {
+        $(
+            impl Priority for $ty {
+                #[inline(always)]
+                fn from_digest_bytes(bytes: &[u8]) -> Self {
+                    let mut out = [0u8; core::mem::size_of::<$ty>()];
+                    let copy_len = bytes.len().min(out.len());
+                    out[..copy_len].copy_from_slice(&bytes[..copy_len]);
+                    <$ty>::from_be_bytes(out)
+                }
+            }
+        )+
+    };
+}
+
+impl_priority_from_bytes!(u16, u32, u64, u128);
+
+struct Node<T, H, P>
 where
     T: Clone + Ord + Hash,
     H: Digest + Clone,
+    P: Priority,
 {
     key: T,
     key_digest: HashOf<H>,
-    priority: u128,
+    priority: P,
     hash: HashOf<H>,
-    left: Link<T, H>,
-    right: Link<T, H>,
+    left: Link<T, H, P>,
+    right: Link<T, H, P>,
 }
 
-impl<T, H> Node<T, H>
+impl<T, H, P> Node<T, H, P>
 where
     T: Clone + Ord + Hash,
     H: Digest + Clone,
+    P: Priority,
 {
     #[inline(always)]
     fn new(key: T) -> Self {
         let key_digest = hash_key::<T, H>(&key);
-        let priority = leading_u128(key_digest.as_ref());
+        let priority = P::from_digest_bytes(key_digest.as_ref());
         let zero = zero_hash::<H>();
         let hash = calculate_node_hash::<H>(&key_digest, &zero, &zero);
         Self {
@@ -89,7 +116,7 @@ where
     }
 
     #[inline(always)]
-    fn left_priority(&self) -> u128 {
+    fn left_priority(&self) -> P {
         self.left
             .as_ref()
             .map(|child| child.priority)
@@ -97,7 +124,7 @@ where
     }
 
     #[inline(always)]
-    fn right_priority(&self) -> u128 {
+    fn right_priority(&self) -> P {
         self.right
             .as_ref()
             .map(|child| child.priority)
@@ -121,7 +148,9 @@ where
 ///
 /// The structure maintains ordering via the [`Ord`] implementation for the key type `T`,
 /// balances using heap rotations directed by deterministic priorities, and produces Merkle
-/// proofs based on the digest `H`.
+/// proofs based on the digest `H`. Priorities are represented by the `P` type parameter, which
+/// defaults to `u128` but may be lowered (for example, to `u64`) by providing a type that
+/// implements [`Priority`].
 ///
 /// # Complexity
 ///
@@ -152,19 +181,21 @@ where
 /// assert!(proof.existence);
 /// assert!(proof.verify(&b"bob".to_vec(), &root));
 /// ```
-pub struct CMTree<T, H = Sha256>
+pub struct CMTree<T, H = Sha256, P = u128>
 where
     T: Clone + Ord + Hash,
     H: Digest + Clone,
+    P: Priority,
 {
-    root: Link<T, H>,
+    root: Link<T, H, P>,
     size: usize,
 }
 
-impl<T, H> CMTree<T, H>
+impl<T, H, P> CMTree<T, H, P>
 where
     T: Clone + Ord + Hash,
     H: Digest + Clone,
+    P: Priority,
 {
     /// Creates an empty Cartesian Merkle Tree.
     #[inline(always)]
@@ -246,7 +277,7 @@ where
     #[inline]
     pub fn generate_proof(&self, key: &T) -> Option<Proof<H>> {
         let mut current = self.root.as_deref()?;
-        let mut path: Vec<(&Node<T, H>, Direction)> = Vec::new();
+        let mut path: Vec<(&Node<T, H, P>, Direction)> = Vec::new();
         let mut existence = false;
         let mut non_existence_key_digest: Option<HashOf<H>> = None;
 
@@ -298,7 +329,7 @@ where
     }
 
     #[inline]
-    fn insert_node(node: Link<T, H>, key: T) -> (Link<T, H>, bool) {
+    fn insert_node(node: Link<T, H, P>, key: T) -> (Link<T, H, P>, bool) {
         match node {
             None => (Some(Box::new(Node::new(key))), true),
             Some(mut boxed) => match key.cmp(&boxed.key) {
@@ -338,7 +369,7 @@ where
     }
 
     #[inline]
-    fn remove_node(node: Link<T, H>, key: &T) -> (Link<T, H>, bool) {
+    fn remove_node(node: Link<T, H, P>, key: &T) -> (Link<T, H, P>, bool) {
         let mut boxed = match node {
             Some(node) => node,
             None => return (None, false),
@@ -386,7 +417,7 @@ where
     }
 
     #[inline]
-    fn rotate_left_owned(mut node: Box<Node<T, H>>) -> Box<Node<T, H>> {
+    fn rotate_left_owned(mut node: Box<Node<T, H, P>>) -> Box<Node<T, H, P>> {
         let mut right = node
             .right
             .take()
@@ -399,7 +430,7 @@ where
     }
 
     #[inline]
-    fn rotate_right_owned(mut node: Box<Node<T, H>>) -> Box<Node<T, H>> {
+    fn rotate_right_owned(mut node: Box<Node<T, H, P>>) -> Box<Node<T, H, P>> {
         let mut left = node
             .left
             .take()
@@ -412,10 +443,11 @@ where
     }
 }
 
-impl<T, H> Default for CMTree<T, H>
+impl<T, H, P> Default for CMTree<T, H, P>
 where
     T: Clone + Ord + Hash,
     H: Digest + Clone,
+    P: Priority,
 {
     #[inline]
     fn default() -> Self {
@@ -561,14 +593,6 @@ where
     let mut hasher = DigestHasher::<H>::new();
     key.hash(&mut hasher);
     hasher.finalize()
-}
-
-#[inline(always)]
-fn leading_u128(bytes: &[u8]) -> u128 {
-    let mut out = [0u8; 16];
-    let copy_len = min(out.len(), bytes.len());
-    out[..copy_len].copy_from_slice(&bytes[..copy_len]);
-    u128::from_be_bytes(out)
 }
 
 #[inline(always)]
@@ -833,5 +857,17 @@ mod tests {
         }
         assert!(tree.is_empty());
         assert_eq!(tree.root_hash(), zero_hash::<Sha256>());
+    }
+
+    #[test]
+    fn supports_lower_priority_width() {
+        let mut tree = CMTree::<Vec<u8>, Sha256, u64>::new();
+        for key in ["10", "5", "20", "18", "25"] {
+            assert!(tree.insert(key.as_bytes().to_vec()));
+        }
+        let root = tree.root_hash();
+        let proof = tree.generate_proof(&b"18".to_vec()).unwrap();
+        assert!(proof.existence);
+        assert!(proof.verify(&b"18".to_vec(), &root));
     }
 }
