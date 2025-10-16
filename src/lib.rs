@@ -870,4 +870,19 @@ mod tests {
         assert!(proof.existence);
         assert!(proof.verify(&b"18".to_vec(), &root));
     }
+
+    #[test]
+    fn works_with_alternative_digest() {
+        use sha2::Sha512;
+
+        let mut tree = CMTree::<Vec<u8>, Sha512>::new();
+        for key in ["alpha", "beta", "gamma", "delta"] {
+            assert!(tree.insert(key.as_bytes().to_vec()));
+        }
+        assert!(tree.contains(&b"gamma".to_vec()));
+        let root = tree.root_hash();
+        let proof = tree.generate_proof(&b"beta".to_vec()).unwrap();
+        assert!(proof.existence);
+        assert!(proof.verify(&b"beta".to_vec(), &root));
+    }
 }

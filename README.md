@@ -95,8 +95,8 @@ ensures priorities act like random values, maintaining balance with high probabi
 
 ## Customization
 
-- **Alternative digests** – instantiate `CMTree::<Vec<u8>, sha3::Sha3_256>::new()` or any
-  `Digest + Clone`.
+- **Alternative digests** – instantiate `CMTree::<Vec<u8>, sha3::Sha3_256>::new()`,
+  `CMTree::<Vec<u8>, Sha512>::new()`, or any other `Digest + Clone` hasher.
 - **Smaller priorities** – use `CMTree::<Vec<u8>, Sha256, u64>::new()` (or any
   [`Priority`](https://docs.rs/cmtree/latest/cmtree/trait.Priority.html) implementer) when
   memory pressure outweighs collision resistance.
