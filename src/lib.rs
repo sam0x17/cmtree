@@ -16,9 +16,9 @@
 //! material. Assuming a strong digest and random-looking priorities, the tree remains balanced
 //! with high probability, yielding:
 //!
-//! * `insert`, `remove`, `contains` – `O(log n)` expected time.
-//! * `generate_proof` – `O(log n)` time and proof size.
-//! * `root_hash` – `O(1)` time (hashes are cached on each node).
+//! * [`CMTree::insert`], [`CMTree::remove`], [`CMTree::contains`] – `O(log n)` expected time.
+//! * [`CMTree::generate_proof`] – `O(log n)` time and proof size.
+//! * [`CMTree::root_hash`] – `O(1)` time (hashes are cached on each node).
 //!
 //! Space consumption is `O(n)` for `n` stored keys, with a single node allocated per entry
 //! plus cached digests for child subtrees.
@@ -154,11 +154,11 @@ where
 ///
 /// # Complexity
 ///
-/// * `insert`, `remove`, and [`contains`](Self::contains) run in expected `O(log n)` time,
-///   where `n` is the number of stored keys.
-/// * [`generate_proof`](Self::generate_proof) executes in `O(log n)` time and produces a proof
-///   with `O(log n)` elements.
-/// * [`root_hash`](Self::root_hash) reads the cached Merkle hash in `O(1)` time.
+/// * [`CMTree::insert`], [`CMTree::remove`], and [`CMTree::contains`] run in expected `O(log
+///   n)` time, where `n` is the number of stored keys.
+/// * [`CMTree::generate_proof`] executes in `O(log n)` time and produces a proof with `O(log
+///   n)` elements.
+/// * [`CMTree::root_hash`] reads the cached Merkle hash in `O(1)` time.
 ///
 /// Space usage is `O(n)` for `n` keys, accounting for one node per key and the cached digests
 /// for children.
