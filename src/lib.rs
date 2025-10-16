@@ -1,4 +1,27 @@
 #![no_std]
+#![cfg_attr(not(test), deny(missing_docs))]
+
+//! Deterministic Cartesian Merkle Tree implementation.
+//!
+//! This crate provides a no-std friendly version of the Cartesian Merkle Tree described in
+//! <https://arxiv.org/pdf/2504.10944>. A Cartesian Merkle Tree combines binary-search-tree
+//! ordering, heap balancing, and Merkle hashing. For each key we derive a deterministic
+//! priority from its hash, producing a unique tree layout regardless of insertion order. Every
+//! node carries an aggregated Merkle hash, enabling succinct membership and non-membership
+//! proofs.
+//!
+//! # Complexity
+//!
+//! The structure behaves similarly to a treap whose priorities are derived from the key
+//! material. Assuming a strong digest and random-looking priorities, the tree remains balanced
+//! with high probability, yielding:
+//!
+//! * `insert`, `remove`, `contains` – `O(log n)` expected time.
+//! * `generate_proof` – `O(log n)` time and proof size.
+//! * `root_hash` – `O(1)` time (hashes are cached on each node).
+//!
+//! Space consumption is `O(n)` for `n` stored keys, with a single node allocated per entry
+//! plus cached digests for child subtrees.
 
 extern crate alloc;
 
@@ -9,7 +32,7 @@ use core::hash::{Hash, Hasher};
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
 
-/// Digest output for the default `Sha256` hasher.
+/// Digest output for the default [`Sha256`] hasher used by [`CartesianMerkleTree`].
 pub type Sha256Hash = Output<Sha256>;
 
 type HashOf<H> = Output<H>;
@@ -87,12 +110,41 @@ where
     }
 }
 
-/// Cartesian Merkle Tree (CMT) as described in https://arxiv.org/pdf/2504.10944.
+/// Deterministic Cartesian Merkle Tree backed by a cryptographic digest.
 ///
-/// The structure maintains:
-/// - BST ordering over keys (using `T`'s `Ord` implementation);
-/// - Heap ordering over deterministic priorities derived from the key material;
-/// - Merkle hashing per node to support membership and non-membership proofs.
+/// The structure maintains ordering via the [`Ord`] implementation for the key type `T`,
+/// balances using heap rotations directed by deterministic priorities, and produces Merkle
+/// proofs based on the digest `H`.
+///
+/// # Complexity
+///
+/// * `insert`, `remove`, and [`contains`](Self::contains) run in expected `O(log n)` time,
+///   where `n` is the number of stored keys.
+/// * [`generate_proof`](Self::generate_proof) executes in `O(log n)` time and produces a proof
+///   with `O(log n)` elements.
+/// * [`root_hash`](Self::root_hash) reads the cached Merkle hash in `O(1)` time.
+///
+/// Space usage is `O(n)` for `n` keys, accounting for one node per key and the cached digests
+/// for children.
+///
+/// # Examples
+///
+/// Basic insertion and membership proof verification:
+///
+/// ```
+/// use cmtree::CartesianMerkleTree;
+///
+/// let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+/// tree.insert(b"alice".to_vec());
+/// tree.insert(b"bob".to_vec());
+/// tree.insert(b"carol".to_vec());
+///
+/// let root = tree.root_hash();
+/// let proof = tree.generate_proof(&b"bob".to_vec()).unwrap();
+///
+/// assert!(proof.existence);
+/// assert!(proof.verify(&b"bob".to_vec(), &root));
+/// ```
 pub struct CartesianMerkleTree<T, H = Sha256>
 where
     T: Clone + Ord + Hash,
@@ -120,12 +172,14 @@ where
         self.size
     }
 
-    /// Returns `true` when the tree is empty.
+    /// Returns whether the tree contains no elements.
     pub const fn is_empty(&self) -> bool {
         self.size == 0
     }
 
-    /// Returns the current Merkle root of the tree. For an empty tree, the root is the zero hash.
+    /// Returns the current Merkle root of the tree.
+    ///
+    /// When the tree is empty the zero hash of the digest is returned.
     pub fn root_hash(&self) -> HashOf<H> {
         self.root
             .as_ref()
@@ -133,7 +187,9 @@ where
             .unwrap_or_else(|| zero_hash::<H>())
     }
 
-    /// Inserts a key into the tree. Returns `true` when the key was newly inserted, `false` otherwise.
+    /// Inserts a key into the tree.
+    ///
+    /// Returns `true` if the key did not previously exist.
     pub fn insert(&mut self, key: T) -> bool {
         let (new_root, inserted) = Self::insert_node(self.root.take(), key);
         self.root = new_root;
@@ -143,7 +199,7 @@ where
         inserted
     }
 
-    /// Checks whether the tree contains the provided key.
+    /// Returns `true` if the provided key exists in the tree.
     pub fn contains(&self, key: &T) -> bool {
         let mut current = self.root.as_deref();
         while let Some(node) = current {
@@ -156,7 +212,9 @@ where
         false
     }
 
-    /// Removes a key from the tree. Returns `true` if the key was present.
+    /// Removes the provided key from the tree.
+    ///
+    /// Returns `true` if the key was present and removed.
     pub fn remove(&mut self, key: &T) -> bool {
         let (new_root, removed) = Self::remove_node(self.root.take(), key);
         if removed {
@@ -166,8 +224,11 @@ where
         removed
     }
 
-    /// Generates a membership or non-membership proof for the provided key. Returns `None`
-    /// when the tree is empty.
+    /// Generates a membership or non-membership proof for the provided key.
+    ///
+    /// Returns `None` when the tree is empty. For membership proofs [`Proof::existence`] is
+    /// `true`. For non-membership proofs the closest node encountered during the lookup is
+    /// supplied as evidence alongside the queried key's child hashes.
     pub fn generate_proof(&self, key: &T) -> Option<Proof<H>> {
         let mut current = self.root.as_deref()?;
         let mut path: Vec<(&Node<T, H>, Direction)> = Vec::new();
@@ -228,13 +289,14 @@ where
                 Ordering::Less => {
                     let (new_left, inserted) = Self::insert_node(boxed.left.take(), key);
                     boxed.left = new_left;
-                    if inserted {
-                        if let Some(ref left) = boxed.left {
-                            if left.priority > boxed.priority {
-                                boxed = Self::rotate_right_owned(boxed);
-                                return (Some(boxed), true);
-                            }
-                        }
+                    if inserted
+                        && boxed
+                            .left
+                            .as_ref()
+                            .is_some_and(|left| left.priority > boxed.priority)
+                    {
+                        boxed = Self::rotate_right_owned(boxed);
+                        return (Some(boxed), true);
                     }
                     boxed.update_hash();
                     (Some(boxed), inserted)
@@ -242,13 +304,14 @@ where
                 Ordering::Greater => {
                     let (new_right, inserted) = Self::insert_node(boxed.right.take(), key);
                     boxed.right = new_right;
-                    if inserted {
-                        if let Some(ref right) = boxed.right {
-                            if right.priority > boxed.priority {
-                                boxed = Self::rotate_left_owned(boxed);
-                                return (Some(boxed), true);
-                            }
-                        }
+                    if inserted
+                        && boxed
+                            .right
+                            .as_ref()
+                            .is_some_and(|right| right.priority > boxed.priority)
+                    {
+                        boxed = Self::rotate_left_owned(boxed);
+                        return (Some(boxed), true);
                     }
                     boxed.update_hash();
                     (Some(boxed), inserted)
@@ -340,23 +403,32 @@ where
     }
 }
 
+/// Authentication data for a single step in a Merkle proof.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProofNode<H>
 where
     H: Digest + Clone,
 {
+    /// Digest of the parent node's key.
     pub parent_key_digest: HashOf<H>,
+    /// Sibling subtree hash encountered on the path to the root.
     pub sibling_hash: HashOf<H>,
 }
 
+/// Membership or non-membership proof for a Cartesian Merkle Tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<H>
 where
     H: Digest + Clone,
 {
+    /// Path of ancestor nodes from the queried entry up to (but not including) the root.
     pub prefix: Vec<ProofNode<H>>,
+    /// Left and right child hashes for the queried entry.
     pub suffix: [HashOf<H>; 2],
+    /// Indicates whether this proof represents membership (`true`) or non-membership
+    /// (`false`).
     pub existence: bool,
+    /// Digest used to demonstrate non-membership when [`Proof::existence`] is `false`.
     pub non_existence_key_digest: Option<HashOf<H>>,
 }
 
@@ -364,7 +436,26 @@ impl<H> Proof<H>
 where
     H: Digest + Clone,
 {
-    /// Verifies this proof against the expected root hash and queried key.
+    /// Verifies the proof against the provided key and root hash.
+    ///
+    /// Membership proofs succeed when the key is present; non-membership proofs succeed when
+    /// the key is absent yet the proof demonstrates the unique neighbouring node that prevents
+    /// its insertion.
+    ///
+    /// ```
+    /// use cmtree::CartesianMerkleTree;
+    ///
+    /// let mut tree = CartesianMerkleTree::<Vec<u8>>::new();
+    /// for key in [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()] {
+    ///     tree.insert(key);
+    /// }
+    ///
+    /// let root = tree.root_hash();
+    /// let proof = tree.generate_proof(&b"a".to_vec()).unwrap();
+    ///
+    /// assert!(proof.existence);
+    /// assert!(proof.verify(&b"a".to_vec(), &root));
+    /// ```
     pub fn verify<K>(&self, key: &K, expected_root: &HashOf<H>) -> bool
     where
         K: Hash,
