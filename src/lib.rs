@@ -764,6 +764,34 @@ mod tests {
     }
 
     #[test]
+    fn proofs_match_across_insertion_orders() {
+        let mut tree_a = CMTree::<Vec<u8>>::new();
+        let mut tree_b = CMTree::<Vec<u8>>::new();
+        let mut inputs: Vec<Vec<u8>> = ["alpha", "beta", "gamma", "delta", "epsilon"]
+            .iter()
+            .map(|s| key(s.as_bytes()))
+            .collect();
+        for k in &inputs {
+            tree_a.insert(k.clone());
+        }
+        inputs.reverse();
+        for k in &inputs {
+            tree_b.insert(k.clone());
+        }
+
+        let target = key(b"gamma");
+        let proof_a = tree_a.generate_proof(&target).expect("proof from order A");
+        let proof_b = tree_b.generate_proof(&target).expect("proof from order B");
+
+        let root = tree_a.root_hash();
+        assert!(proof_a.verify(&target, &root));
+        assert!(proof_b.verify(&target, &root));
+        assert_eq!(proof_a.prefix.len(), proof_b.prefix.len());
+        assert_eq!(proof_a.suffix, proof_b.suffix);
+        assert_eq!(proof_a.existence, proof_b.existence);
+    }
+
+    #[test]
     fn membership_proof_rejects_when_flag_flipped() {
         let mut tree = CMTree::<Vec<u8>>::new();
         for k in ["left", "right", "root", "branch"] {
