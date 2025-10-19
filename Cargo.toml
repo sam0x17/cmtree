@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["sam0x17"]
 description = "A generic Cartesian Merkle Tree implementation"
-keywords = ["cartesian merkle tree", "merkle", "merkle tree", "data structure", "cartesian"]
+keywords = ["cartesian merkle", "merkle", "merkle tree", "data structure", "cartesian"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sam0x17/cmtree"
 
