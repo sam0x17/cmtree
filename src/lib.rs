@@ -144,6 +144,39 @@ where
     }
 }
 
+struct BatchNode<T, H, P>
+where
+    T: Clone + Ord + Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    key: T,
+    key_digest: HashOf<H>,
+    priority: P,
+    left: Option<usize>,
+    right: Option<usize>,
+}
+
+impl<T, H, P> BatchNode<T, H, P>
+where
+    T: Clone + Ord + Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    #[inline]
+    fn new(key: T) -> Self {
+        let key_digest = hash_key::<T, H>(&key);
+        let priority = P::from_digest_bytes(key_digest.as_ref());
+        Self {
+            key,
+            key_digest,
+            priority,
+            left: None,
+            right: None,
+        }
+    }
+}
+
 /// Deterministic Cartesian Merkle Tree backed by a cryptographic digest.
 ///
 /// The structure maintains ordering via the [`Ord`] implementation for the key type `T`,
@@ -239,6 +272,41 @@ where
         if inserted {
             self.size += 1;
         }
+        inserted
+    }
+
+    /// Inserts multiple keys as a single batch.
+    ///
+    /// The provided iterator is collected, sorted, and deduplicated before constructing an
+    /// intermediate treap that is merged into the existing tree. This approach amortizes
+    /// structural rotations and hash recomputation, making it significantly faster than
+    /// invoking [`CMTree::insert`] repeatedly for large datasets. Returns the number of new
+    /// keys that were actually inserted.
+    #[inline]
+    pub fn insert_batch<I>(&mut self, keys: I) -> usize
+    where
+        I: IntoIterator<Item = T>,
+    {
+        let mut incoming: Vec<T> = keys.into_iter().collect();
+        if incoming.is_empty() {
+            return 0;
+        }
+
+        incoming.sort();
+        incoming.dedup();
+        if incoming.is_empty() {
+            return 0;
+        }
+
+        let batch_size = incoming.len();
+        let batch_tree = Self::build_batch_tree(incoming);
+        let mut duplicates = 0usize;
+        let merged = Self::merge_trees(self.root.take(), batch_tree, &mut duplicates);
+        let inserted = batch_size - duplicates;
+        if inserted > 0 {
+            self.size += inserted;
+        }
+        self.root = merged;
         inserted
     }
 
@@ -413,6 +481,150 @@ where
                     (Some(boxed), removed)
                 }
             }
+        }
+    }
+
+    fn build_batch_tree(sorted_keys: Vec<T>) -> Link<T, H, P> {
+        if sorted_keys.is_empty() {
+            return None;
+        }
+
+        let mut nodes: Vec<Option<BatchNode<T, H, P>>> = sorted_keys
+            .into_iter()
+            .map(|key| Some(BatchNode::new(key)))
+            .collect();
+        let mut stack: Vec<usize> = Vec::with_capacity(nodes.len());
+
+        for idx in 0..nodes.len() {
+            let priority = nodes[idx].as_ref().expect("batch node present").priority;
+            let mut last: Option<usize> = None;
+            while let Some(&top_idx) = stack.last() {
+                let top_priority = nodes[top_idx]
+                    .as_ref()
+                    .expect("batch node present")
+                    .priority;
+                if top_priority > priority {
+                    break;
+                }
+                last = stack.pop();
+            }
+            nodes[idx].as_mut().expect("batch node present").left = last;
+            if let Some(&parent_idx) = stack.last() {
+                nodes[parent_idx]
+                    .as_mut()
+                    .expect("batch node present")
+                    .right = Some(idx);
+            }
+            stack.push(idx);
+        }
+
+        let root_idx = *stack.first().expect("non-empty batch stack");
+        Self::materialize_batch_subtree(&mut nodes, root_idx)
+    }
+
+    fn materialize_batch_subtree(
+        nodes: &mut [Option<BatchNode<T, H, P>>],
+        idx: usize,
+    ) -> Link<T, H, P> {
+        let mut node = nodes[idx]
+            .take()
+            .expect("batch node should be consumed once");
+        let left = node
+            .left
+            .take()
+            .and_then(|child| Self::materialize_batch_subtree(nodes, child));
+        let right = node
+            .right
+            .take()
+            .and_then(|child| Self::materialize_batch_subtree(nodes, child));
+        let left_hash = left
+            .as_ref()
+            .map(|child| child.hash.clone())
+            .unwrap_or_else(|| zero_hash::<H>());
+        let right_hash = right
+            .as_ref()
+            .map(|child| child.hash.clone())
+            .unwrap_or_else(|| zero_hash::<H>());
+        let hash = calculate_node_hash::<H>(&node.key_digest, &left_hash, &right_hash);
+        Some(Box::new(Node {
+            key: node.key,
+            key_digest: node.key_digest,
+            priority: node.priority,
+            hash,
+            left,
+            right,
+        }))
+    }
+
+    fn merge_trees(
+        existing: Link<T, H, P>,
+        new_tree: Link<T, H, P>,
+        duplicates: &mut usize,
+    ) -> Link<T, H, P> {
+        match (existing, new_tree) {
+            (tree, None) | (None, tree) => tree,
+            (Some(mut existing_node), Some(mut new_node)) => {
+                if existing_node.priority >= new_node.priority {
+                    let (less_new, equal_new, greater_new) =
+                        Self::split_three(Some(new_node), &existing_node.key);
+                    if equal_new.is_some() {
+                        *duplicates += 1;
+                    }
+                    let left = Self::merge_trees(existing_node.left.take(), less_new, duplicates);
+                    let right =
+                        Self::merge_trees(existing_node.right.take(), greater_new, duplicates);
+                    existing_node.left = left;
+                    existing_node.right = right;
+                    existing_node.update_hash();
+                    Some(existing_node)
+                } else {
+                    let (less_existing, equal_existing, greater_existing) =
+                        Self::split_three(Some(existing_node), &new_node.key);
+                    if let Some(mut existing_dup) = equal_existing {
+                        *duplicates += 1;
+                        let left =
+                            Self::merge_trees(less_existing, new_node.left.take(), duplicates);
+                        let right =
+                            Self::merge_trees(greater_existing, new_node.right.take(), duplicates);
+                        existing_dup.left = left;
+                        existing_dup.right = right;
+                        existing_dup.update_hash();
+                        Some(existing_dup)
+                    } else {
+                        new_node.left =
+                            Self::merge_trees(less_existing, new_node.left.take(), duplicates);
+                        new_node.right =
+                            Self::merge_trees(greater_existing, new_node.right.take(), duplicates);
+                        new_node.update_hash();
+                        Some(new_node)
+                    }
+                }
+            }
+        }
+    }
+
+    fn split_three(tree: Link<T, H, P>, key: &T) -> (Link<T, H, P>, Link<T, H, P>, Link<T, H, P>) {
+        match tree {
+            None => (None, None, None),
+            Some(mut node) => match key.cmp(&node.key) {
+                Ordering::Less => {
+                    let (less, equal, greater) = Self::split_three(node.left.take(), key);
+                    node.left = greater;
+                    node.update_hash();
+                    (less, equal, Some(node))
+                }
+                Ordering::Greater => {
+                    let (less, equal, greater) = Self::split_three(node.right.take(), key);
+                    node.right = less;
+                    node.update_hash();
+                    (Some(node), equal, greater)
+                }
+                Ordering::Equal => {
+                    let left = node.left.take();
+                    let right = node.right.take();
+                    (left, Some(node), right)
+                }
+            },
         }
     }
 
@@ -912,5 +1124,148 @@ mod tests {
         let proof = tree.generate_proof(&b"beta".to_vec()).unwrap();
         assert!(proof.existence);
         assert!(proof.verify(&b"beta".to_vec(), &root));
+    }
+
+    #[test]
+    fn batch_insert_matches_sequential_inserts() {
+        let dataset = ["alice", "bob", "carol", "dave", "erin", "frank"];
+        let mut batch = CMTree::<Vec<u8>>::new();
+        let inserted = batch.insert_batch(dataset.iter().map(|k| key(k.as_bytes())));
+        assert_eq!(inserted, dataset.len());
+
+        let mut sequential = CMTree::<Vec<u8>>::new();
+        for k in dataset {
+            sequential.insert(key(k.as_bytes()));
+        }
+
+        assert_eq!(batch.len(), sequential.len());
+        assert_eq!(batch.root_hash(), sequential.root_hash());
+    }
+
+    #[test]
+    fn batch_insert_merges_with_existing_tree() {
+        let mut tree = CMTree::<Vec<u8>>::new();
+        for k in ["10", "30", "50"] {
+            assert!(tree.insert(key(k.as_bytes())));
+        }
+
+        let inserted = tree.insert_batch([key(b"05"), key(b"20"), key(b"30"), key(b"60")]);
+
+        assert_eq!(inserted, 3);
+        assert_eq!(tree.len(), 6);
+        for k in ["05", "10", "20", "30", "50", "60"] {
+            assert!(tree.contains(&key(k.as_bytes())));
+        }
+    }
+
+    #[test]
+    fn batch_insert_ignores_duplicates_within_batch() {
+        let mut tree = CMTree::<Vec<u8>>::new();
+        let inserted = tree.insert_batch([
+            key(b"alpha"),
+            key(b"alpha"),
+            key(b"beta"),
+            key(b"beta"),
+            key(b"gamma"),
+        ]);
+        assert_eq!(inserted, 3);
+        assert_eq!(tree.len(), 3);
+        assert!(tree.contains(&key(b"alpha")));
+        assert!(tree.contains(&key(b"beta")));
+        assert!(tree.contains(&key(b"gamma")));
+    }
+
+    #[test]
+    fn batch_insert_returns_zero_for_empty_iterator() {
+        let mut tree = CMTree::<Vec<u8>>::new();
+        assert_eq!(tree.insert_batch([key(b"seed")]), 1);
+        let len_before = tree.len();
+        let inserted = tree.insert_batch(std::iter::empty());
+        assert_eq!(inserted, 0);
+        assert_eq!(tree.len(), len_before);
+    }
+
+    #[test]
+    fn batch_insert_preserves_membership_and_non_membership_proofs() {
+        let mut tree = CMTree::<Vec<u8>>::new();
+        let dataset = ["alpha", "beta", "carol", "delta", "echo"];
+        tree.insert_batch(dataset.iter().map(|k| key(k.as_bytes())));
+
+        let root = tree.root_hash();
+        let member = key(b"carol");
+        let member_proof = tree
+            .generate_proof(&member)
+            .expect("proof should exist for member");
+        assert!(member_proof.existence);
+        assert!(member_proof.verify(&member, &root));
+
+        let missing = key(b"foxtrot");
+        let missing_proof = tree
+            .generate_proof(&missing)
+            .expect("proof should exist for non-member");
+        assert!(!missing_proof.existence);
+        assert!(missing_proof.verify(&missing, &root));
+    }
+
+    #[test]
+    fn batch_insert_scales_like_sequential_inserts_for_large_inputs() {
+        const COUNT: u64 = 2_048;
+        let mut batch = CMTree::<u64>::new();
+        let inserted = batch.insert_batch(0u64..COUNT);
+        assert_eq!(inserted as u64, COUNT);
+        assert_eq!(batch.len() as u64, COUNT);
+
+        let mut sequential = CMTree::<u64>::new();
+        for value in 0..COUNT {
+            assert!(sequential.insert(value));
+        }
+
+        assert_eq!(batch.len(), sequential.len());
+        assert_eq!(batch.root_hash(), sequential.root_hash());
+        assert!(batch.contains(&1234));
+        assert!(!batch.contains(&COUNT));
+    }
+
+    #[test]
+    fn batch_insert_accepts_unsorted_iterators_with_duplicates() {
+        let mut tree_batch = CMTree::<Vec<u8>>::new();
+        let dataset = [
+            b"delta".to_vec(),
+            b"alpha".to_vec(),
+            b"charlie".to_vec(),
+            b"bravo".to_vec(),
+            b"alpha".to_vec(),
+            b"echo".to_vec(),
+        ];
+        let inserted = tree_batch.insert_batch(dataset.clone());
+        assert_eq!(inserted, 5); // "alpha" appears twice.
+
+        let mut tree_sequential = CMTree::<Vec<u8>>::new();
+        let mut inserted_seq = 0;
+        for key in dataset {
+            if tree_sequential.insert(key.clone()) {
+                inserted_seq += 1;
+            }
+        }
+        assert_eq!(inserted_seq, inserted);
+        assert_eq!(tree_batch.len(), tree_sequential.len());
+        assert_eq!(tree_batch.root_hash(), tree_sequential.root_hash());
+    }
+
+    #[test]
+    fn batch_insert_returns_zero_when_everything_already_exists() {
+        let initial = ["10", "20", "30", "40"];
+        let mut tree = CMTree::<Vec<u8>>::new();
+        assert_eq!(
+            tree.insert_batch(initial.iter().map(|k| key(k.as_bytes()))),
+            initial.len()
+        );
+        let len = tree.len();
+        let root_before = tree.root_hash();
+        let inserted = tree.insert_batch([key(b"40"), key(b"20"), key(b"10"), key(b"30")]);
+        assert_eq!(inserted, 0);
+        assert_eq!(tree.len(), len);
+        let root_after = tree.root_hash();
+        assert_eq!(root_before, root_after);
     }
 }

@@ -28,6 +28,7 @@ and proofs remain compact.
   `O(log n)` time, with hash ordering that matches the research paper.
 - 🧵 **No-std first** – uses `alloc` only; works in embedded and wasm contexts.
 - 🧩 **Pluggable hashers** – swap `Sha256` for any `Digest + Clone` such as `blake3` or `sha3`.
+- 📦 **Batch insertion** – amortize rotations by feeding entire slices to `insert_batch`.
 - 🧪 **Tested** – extensive unit, doc, and large-structure tests plus a CI pipeline covering
   `cargo fmt`, `clippy`, `doc`, and `test`.
 
@@ -47,6 +48,13 @@ fn main() {
     tree.insert(b"alice".to_vec());
     tree.insert(b"bob".to_vec());
     tree.insert(b"carol".to_vec());
+
+    // Or populate in a single pass when you already have the collection:
+    tree.insert_batch([
+        b"alice".to_vec(),
+        b"bob".to_vec(),
+        b"carol".to_vec(),
+    ]);
 
     assert!(tree.contains(&b"bob".to_vec()));
     assert_eq!(tree.len(), 3);
