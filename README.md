@@ -151,3 +151,16 @@ Planned enhancements:
 
 Feedback and contributions are welcome! Open an issue or pull request to discuss ideas or
 report edge cases.
+
+## Benchmarks
+
+Criterion benches cover inserts, removals, proofs, and the batch-loading workloads mentioned
+in the paper (including 5k and 10k batches applied to structures that already store 1 million
+keys). Run them with:
+
+```
+cargo bench -- merkle_structs
+```
+
+The million-element batch benchmarks are intentionally heavy; expect a few minutes on slower
+machines.
