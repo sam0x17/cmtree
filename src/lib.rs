@@ -29,6 +29,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::cmp::{Ordering, min};
 use core::hash::{Hash, Hasher};
+use core::mem;
 use sha2::digest::Output;
 use sha2::{Digest, Sha256};
 
@@ -144,6 +145,107 @@ where
     }
 }
 
+type MapLink<K, V, H, P> = Option<Box<MapNode<K, V, H, P>>>;
+
+struct MapNode<K, V, H, P>
+where
+    K: Clone + Ord + Hash,
+    V: Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    key: K,
+    value: V,
+    key_digest: HashOf<H>,
+    value_digest: HashOf<H>,
+    priority: P,
+    hash: HashOf<H>,
+    left: MapLink<K, V, H, P>,
+    right: MapLink<K, V, H, P>,
+}
+
+impl<K, V, H, P> MapNode<K, V, H, P>
+where
+    K: Clone + Ord + Hash,
+    V: Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    #[inline(always)]
+    fn new(key: K, value: V) -> Self {
+        let key_digest = hash_key::<K, H>(&key);
+        let value_digest = hash_key::<V, H>(&value);
+        let priority = P::from_digest_bytes(key_digest.as_ref());
+        let zero = zero_hash::<H>();
+        let hash = calculate_map_node_hash::<H>(&key_digest, &value_digest, &zero, &zero);
+        Self {
+            key,
+            value,
+            key_digest,
+            value_digest,
+            priority,
+            hash,
+            left: None,
+            right: None,
+        }
+    }
+
+    #[inline(always)]
+    fn left_hash(&self) -> HashOf<H> {
+        self.left
+            .as_ref()
+            .map(|child| child.hash.clone())
+            .unwrap_or_else(|| zero_hash::<H>())
+    }
+
+    #[inline(always)]
+    fn right_hash(&self) -> HashOf<H> {
+        self.right
+            .as_ref()
+            .map(|child| child.hash.clone())
+            .unwrap_or_else(|| zero_hash::<H>())
+    }
+
+    #[inline(always)]
+    fn left_priority(&self) -> P {
+        self.left
+            .as_ref()
+            .map(|child| child.priority)
+            .unwrap_or_default()
+    }
+
+    #[inline(always)]
+    fn right_priority(&self) -> P {
+        self.right
+            .as_ref()
+            .map(|child| child.priority)
+            .unwrap_or_default()
+    }
+
+    #[inline(always)]
+    fn key_digest(&self) -> &HashOf<H> {
+        &self.key_digest
+    }
+
+    #[inline(always)]
+    fn value_digest(&self) -> &HashOf<H> {
+        &self.value_digest
+    }
+
+    #[inline(always)]
+    fn update_value_digest(&mut self) {
+        self.value_digest = hash_key::<V, H>(&self.value);
+    }
+
+    #[inline(always)]
+    fn update_hash(&mut self) {
+        let left = self.left_hash();
+        let right = self.right_hash();
+        self.hash =
+            calculate_map_node_hash::<H>(self.key_digest(), self.value_digest(), &left, &right);
+    }
+}
+
 struct BatchNode<T, H, P>
 where
     T: Clone + Ord + Hash,
@@ -170,6 +272,55 @@ where
         Self {
             key,
             key_digest,
+            priority,
+            left: None,
+            right: None,
+        }
+    }
+}
+
+struct MapBatchEntry<K, V>
+where
+    K: Clone,
+    V: Hash,
+{
+    key: K,
+    value: V,
+}
+
+struct MapBatchNode<K, V, H, P>
+where
+    K: Clone + Ord + Hash,
+    V: Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    key: K,
+    value: V,
+    key_digest: HashOf<H>,
+    value_digest: HashOf<H>,
+    priority: P,
+    left: Option<usize>,
+    right: Option<usize>,
+}
+
+impl<K, V, H, P> MapBatchNode<K, V, H, P>
+where
+    K: Clone + Ord + Hash,
+    V: Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    #[inline]
+    fn new(key: K, value: V) -> Self {
+        let key_digest = hash_key::<K, H>(&key);
+        let value_digest = hash_key::<V, H>(&value);
+        let priority = P::from_digest_bytes(key_digest.as_ref());
+        Self {
+            key,
+            value,
+            key_digest,
+            value_digest,
             priority,
             left: None,
             right: None,
@@ -221,6 +372,40 @@ where
     P: Priority,
 {
     root: Link<T, H, P>,
+    size: usize,
+}
+
+/// Deterministic Cartesian Merkle Map storing key/value pairs with authenticated payloads.
+///
+/// The map mirrors [`CMTree`] but extends each node with a hashed value, so every key has a
+/// binding commitment baked into the Merkle accumulator. Keys determine the ordering and
+/// priorities exactly as in [`CMTree`], keeping lookups, insertions, and rotations in
+/// `O(log n)` expected time.
+///
+/// # Examples
+///
+/// ```
+/// use cmtree::CMMap;
+///
+/// let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+/// map.insert(b"alice".to_vec(), b"pubkey-alice".to_vec());
+/// map.insert(b"bob".to_vec(), b"pubkey-bob".to_vec());
+///
+/// assert!(map.contains_key(&b"alice".to_vec()));
+/// assert_eq!(map.len(), 2);
+///
+/// let root = map.root_hash();
+/// let proof = map.generate_proof(&b"bob".to_vec()).unwrap();
+/// assert!(proof.verify(&b"bob".to_vec(), Some(&b"pubkey-bob".to_vec()), &root));
+/// ```
+pub struct CMMap<K, V, H = Sha256, P = u128>
+where
+    K: Clone + Ord + Hash,
+    V: Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    root: MapLink<K, V, H, P>,
     size: usize,
 }
 
@@ -655,6 +840,542 @@ where
     }
 }
 
+impl<K, V, H, P> CMMap<K, V, H, P>
+where
+    K: Clone + Ord + Hash,
+    V: Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    /// Creates an empty Cartesian Merkle Map.
+    #[inline(always)]
+    pub const fn new() -> Self {
+        Self {
+            root: None,
+            size: 0,
+        }
+    }
+
+    /// Returns the number of stored entries.
+    #[inline(always)]
+    pub const fn len(&self) -> usize {
+        self.size
+    }
+
+    /// Returns whether the map is empty.
+    #[inline(always)]
+    pub const fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+
+    /// Returns the authenticated Merkle root for the entire map.
+    #[inline(always)]
+    pub fn root_hash(&self) -> HashOf<H> {
+        self.root
+            .as_ref()
+            .map(|node| node.hash.clone())
+            .unwrap_or_else(|| zero_hash::<H>())
+    }
+
+    /// Inserts or replaces a value for the provided key.
+    ///
+    /// Returns the previous value when the key existed.
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        let (new_root, replaced, inserted) = Self::insert_node(self.root.take(), key, value);
+        if inserted {
+            self.size += 1;
+        }
+        self.root = new_root;
+        replaced
+    }
+
+    /// Returns a reference to the value for `key`, if present.
+    #[inline]
+    pub fn get(&self, key: &K) -> Option<&V> {
+        let mut current = self.root.as_deref();
+        while let Some(node) = current {
+            match key.cmp(&node.key) {
+                Ordering::Less => current = node.left.as_deref(),
+                Ordering::Greater => current = node.right.as_deref(),
+                Ordering::Equal => return Some(&node.value),
+            }
+        }
+        None
+    }
+
+    /// Returns a mutable reference to the value for `key`, if present.
+    #[inline]
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let mut current = self.root.as_deref_mut();
+        while let Some(node) = current {
+            match key.cmp(&node.key) {
+                Ordering::Less => current = node.left.as_deref_mut(),
+                Ordering::Greater => current = node.right.as_deref_mut(),
+                Ordering::Equal => return Some(&mut node.value),
+            }
+        }
+        None
+    }
+
+    /// Returns `true` if the key exists in the map.
+    #[inline]
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// Inserts multiple entries as a single batch.
+    ///
+    /// Entries are collected, sorted, deduplicated (keeping the last value for each key), and
+    /// converted into a temporary treap that is merged into the existing map. Returns the number
+    /// of newly inserted keys. Keys that already existed but were updated by the batch do not
+    /// contribute to the return value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cmtree::CMMap;
+    ///
+    /// let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+    /// let inserted = map.insert_batch([
+    ///     (b"alice".to_vec(), b"pubkey-a".to_vec()),
+    ///     (b"bob".to_vec(), b"pubkey-b".to_vec()),
+    ///     (b"alice".to_vec(), b"pubkey-a2".to_vec()),
+    /// ]);
+    /// assert_eq!(inserted, 2);
+    /// assert_eq!(map.get(&b"alice".to_vec()), Some(&b"pubkey-a2".to_vec()));
+    /// ```
+    pub fn insert_batch<I>(&mut self, entries: I) -> usize
+    where
+        I: IntoIterator<Item = (K, V)>,
+    {
+        let mut incoming: Vec<MapBatchEntry<K, V>> = entries
+            .into_iter()
+            .map(|(key, value)| MapBatchEntry { key, value })
+            .collect();
+        if incoming.is_empty() {
+            return 0;
+        }
+
+        incoming.sort_by(|a, b| a.key.cmp(&b.key));
+        let mut deduped: Vec<MapBatchEntry<K, V>> = Vec::with_capacity(incoming.len());
+        for entry in incoming.into_iter() {
+            if let Some(last) = deduped.last_mut() {
+                if last.key == entry.key {
+                    last.value = entry.value;
+                    continue;
+                }
+            }
+            deduped.push(entry);
+        }
+        if deduped.is_empty() {
+            return 0;
+        }
+
+        let batch_size = deduped.len();
+        let batch_tree = Self::build_batch_map_tree(deduped);
+        let mut overlap = 0usize;
+        let merged = Self::merge_map_trees(self.root.take(), batch_tree, &mut overlap);
+        let inserted = batch_size - overlap;
+        if inserted > 0 {
+            self.size += inserted;
+        }
+        self.root = merged;
+        inserted
+    }
+
+    /// Removes the key/value pair and returns the previous value, if any.
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        let (new_root, removed, changed) = Self::remove_node(self.root.take(), key);
+        if changed {
+            self.size -= 1;
+        }
+        self.root = new_root;
+        removed
+    }
+
+    /// Generates a proof attesting to the presence or absence of `key` and, for membership,
+    /// the stored value digest.
+    ///
+    /// When the key exists, [`MapProof::value_digest`] represents the stored value hash. When the
+    /// key is missing, `value_digest` reflects the nearest neighbour that prevents the insertion
+    /// (matching the Cartesian Merkle Tree proof strategy).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cmtree::CMMap;
+    ///
+    /// let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+    /// map.insert(b"alice".to_vec(), b"pubkey".to_vec());
+    /// let root = map.root_hash();
+    /// let proof = map.generate_proof(&b"alice".to_vec()).unwrap();
+    /// assert!(proof.verify(&b"alice".to_vec(), Some(&b"pubkey".to_vec()), &root));
+    /// ```
+    pub fn generate_proof(&self, key: &K) -> Option<MapProof<H>> {
+        let mut current = self.root.as_deref()?;
+        let mut path: Vec<(&MapNode<K, V, H, P>, Direction)> = Vec::new();
+        let mut existence = false;
+        let mut non_existence_key_digest = None;
+        let (suffix, value_digest) = loop {
+            match key.cmp(&current.key) {
+                Ordering::Less => {
+                    if let Some(left_child) = current.left.as_deref() {
+                        path.push((current, Direction::Left));
+                        current = left_child;
+                    } else {
+                        non_existence_key_digest = Some(current.key_digest().clone());
+                        break (
+                            [current.left_hash(), current.right_hash()],
+                            current.value_digest().clone(),
+                        );
+                    }
+                }
+                Ordering::Greater => {
+                    if let Some(right_child) = current.right.as_deref() {
+                        path.push((current, Direction::Right));
+                        current = right_child;
+                    } else {
+                        non_existence_key_digest = Some(current.key_digest().clone());
+                        break (
+                            [current.left_hash(), current.right_hash()],
+                            current.value_digest().clone(),
+                        );
+                    }
+                }
+                Ordering::Equal => {
+                    existence = true;
+                    break (
+                        [current.left_hash(), current.right_hash()],
+                        current.value_digest().clone(),
+                    );
+                }
+            }
+        };
+
+        let mut prefix = Vec::with_capacity(path.len());
+        for (node, direction) in path.into_iter().rev() {
+            let sibling_hash = match direction {
+                Direction::Left => node.right_hash(),
+                Direction::Right => node.left_hash(),
+            };
+            prefix.push(MapProofNode {
+                parent_key_digest: node.key_digest().clone(),
+                parent_value_digest: node.value_digest().clone(),
+                sibling_hash,
+            });
+        }
+
+        Some(MapProof {
+            prefix,
+            suffix,
+            existence,
+            non_existence_key_digest,
+            value_digest,
+        })
+    }
+
+    fn insert_node(
+        node: MapLink<K, V, H, P>,
+        key: K,
+        value: V,
+    ) -> (MapLink<K, V, H, P>, Option<V>, bool) {
+        match node {
+            None => (Some(Box::new(MapNode::new(key, value))), None, true),
+            Some(mut boxed) => match key.cmp(&boxed.key) {
+                Ordering::Less => {
+                    let (new_left, replaced, inserted) =
+                        Self::insert_node(boxed.left.take(), key, value);
+                    boxed.left = new_left;
+                    if inserted
+                        && boxed
+                            .left
+                            .as_ref()
+                            .is_some_and(|left| left.priority > boxed.priority)
+                    {
+                        boxed = Self::rotate_right_owned(boxed);
+                        return (Some(boxed), replaced, inserted);
+                    }
+                    boxed.update_hash();
+                    (Some(boxed), replaced, inserted)
+                }
+                Ordering::Greater => {
+                    let (new_right, replaced, inserted) =
+                        Self::insert_node(boxed.right.take(), key, value);
+                    boxed.right = new_right;
+                    if inserted
+                        && boxed
+                            .right
+                            .as_ref()
+                            .is_some_and(|right| right.priority > boxed.priority)
+                    {
+                        boxed = Self::rotate_left_owned(boxed);
+                        return (Some(boxed), replaced, inserted);
+                    }
+                    boxed.update_hash();
+                    (Some(boxed), replaced, inserted)
+                }
+                Ordering::Equal => {
+                    let mut new_value = value;
+                    mem::swap(&mut boxed.value, &mut new_value);
+                    boxed.update_value_digest();
+                    boxed.update_hash();
+                    (Some(boxed), Some(new_value), false)
+                }
+            },
+        }
+    }
+
+    fn remove_node(node: MapLink<K, V, H, P>, key: &K) -> (MapLink<K, V, H, P>, Option<V>, bool) {
+        let mut boxed = match node {
+            Some(node) => node,
+            None => return (None, None, false),
+        };
+
+        match key.cmp(&boxed.key) {
+            Ordering::Less => {
+                let (new_left, removed, changed) = Self::remove_node(boxed.left.take(), key);
+                boxed.left = new_left;
+                if changed {
+                    boxed.update_hash();
+                }
+                (Some(boxed), removed, changed)
+            }
+            Ordering::Greater => {
+                let (new_right, removed, changed) = Self::remove_node(boxed.right.take(), key);
+                boxed.right = new_right;
+                if changed {
+                    boxed.update_hash();
+                }
+                (Some(boxed), removed, changed)
+            }
+            Ordering::Equal => {
+                if boxed.left.is_none() {
+                    return (boxed.right.take(), Some(boxed.value), true);
+                }
+                if boxed.right.is_none() {
+                    return (boxed.left.take(), Some(boxed.value), true);
+                }
+                if boxed.left_priority() > boxed.right_priority() {
+                    boxed = Self::rotate_right_owned(boxed);
+                    let (new_right, removed, changed) = Self::remove_node(boxed.right.take(), key);
+                    boxed.right = new_right;
+                    boxed.update_hash();
+                    (Some(boxed), removed, changed)
+                } else {
+                    boxed = Self::rotate_left_owned(boxed);
+                    let (new_left, removed, changed) = Self::remove_node(boxed.left.take(), key);
+                    boxed.left = new_left;
+                    boxed.update_hash();
+                    (Some(boxed), removed, changed)
+                }
+            }
+        }
+    }
+
+    #[inline]
+    fn rotate_left_owned(mut node: Box<MapNode<K, V, H, P>>) -> Box<MapNode<K, V, H, P>> {
+        let mut right = node
+            .right
+            .take()
+            .expect("rotate_left_owned requires a right child");
+        node.right = right.left.take();
+        node.update_hash();
+        right.left = Some(node);
+        right.update_hash();
+        right
+    }
+
+    #[inline]
+    fn rotate_right_owned(mut node: Box<MapNode<K, V, H, P>>) -> Box<MapNode<K, V, H, P>> {
+        let mut left = node
+            .left
+            .take()
+            .expect("rotate_right_owned requires a left child");
+        node.left = left.right.take();
+        node.update_hash();
+        left.right = Some(node);
+        left.update_hash();
+        left
+    }
+
+    fn build_batch_map_tree(entries: Vec<MapBatchEntry<K, V>>) -> MapLink<K, V, H, P> {
+        if entries.is_empty() {
+            return None;
+        }
+
+        let mut nodes: Vec<Option<MapBatchNode<K, V, H, P>>> = entries
+            .into_iter()
+            .map(|entry| Some(MapBatchNode::new(entry.key, entry.value)))
+            .collect();
+        let mut stack: Vec<usize> = Vec::with_capacity(nodes.len());
+
+        for idx in 0..nodes.len() {
+            let priority = nodes[idx]
+                .as_ref()
+                .expect("batch map node present")
+                .priority;
+            let mut last: Option<usize> = None;
+            while let Some(&top_idx) = stack.last() {
+                let top_priority = nodes[top_idx]
+                    .as_ref()
+                    .expect("batch map node present")
+                    .priority;
+                if top_priority > priority {
+                    break;
+                }
+                last = stack.pop();
+            }
+            nodes[idx].as_mut().expect("batch map node present").left = last;
+            if let Some(&parent_idx) = stack.last() {
+                nodes[parent_idx]
+                    .as_mut()
+                    .expect("batch map node present")
+                    .right = Some(idx);
+            }
+            stack.push(idx);
+        }
+
+        let root_idx = *stack.first().expect("non-empty map batch stack");
+        Self::materialize_map_batch_subtree(&mut nodes, root_idx)
+    }
+
+    fn materialize_map_batch_subtree(
+        nodes: &mut [Option<MapBatchNode<K, V, H, P>>],
+        idx: usize,
+    ) -> MapLink<K, V, H, P> {
+        let mut node = nodes[idx]
+            .take()
+            .expect("map batch node should be consumed once");
+        let left = node
+            .left
+            .take()
+            .and_then(|child| Self::materialize_map_batch_subtree(nodes, child));
+        let right = node
+            .right
+            .take()
+            .and_then(|child| Self::materialize_map_batch_subtree(nodes, child));
+        let left_hash = left
+            .as_ref()
+            .map(|child| child.hash.clone())
+            .unwrap_or_else(|| zero_hash::<H>());
+        let right_hash = right
+            .as_ref()
+            .map(|child| child.hash.clone())
+            .unwrap_or_else(|| zero_hash::<H>());
+        let hash = calculate_map_node_hash::<H>(
+            &node.key_digest,
+            &node.value_digest,
+            &left_hash,
+            &right_hash,
+        );
+        Some(Box::new(MapNode {
+            key: node.key,
+            value: node.value,
+            key_digest: node.key_digest,
+            value_digest: node.value_digest,
+            priority: node.priority,
+            hash,
+            left,
+            right,
+        }))
+    }
+
+    fn merge_map_trees(
+        existing: MapLink<K, V, H, P>,
+        new_tree: MapLink<K, V, H, P>,
+        overlap: &mut usize,
+    ) -> MapLink<K, V, H, P> {
+        match (existing, new_tree) {
+            (tree, None) | (None, tree) => tree,
+            (Some(mut existing_node), Some(mut new_node)) => {
+                if existing_node.priority >= new_node.priority {
+                    let (less_new, equal_new, greater_new) =
+                        Self::split_map_three(Some(new_node), &existing_node.key);
+                    if let Some(replacement) = equal_new {
+                        *overlap += 1;
+                        existing_node.value = replacement.value;
+                        existing_node.value_digest = replacement.value_digest;
+                    }
+                    existing_node.left =
+                        Self::merge_map_trees(existing_node.left.take(), less_new, overlap);
+                    existing_node.right =
+                        Self::merge_map_trees(existing_node.right.take(), greater_new, overlap);
+                    existing_node.update_hash();
+                    Some(existing_node)
+                } else {
+                    let (less_existing, equal_existing, greater_existing) =
+                        Self::split_map_three(Some(existing_node), &new_node.key);
+                    if let Some(mut existing_dup) = equal_existing {
+                        *overlap += 1;
+                        existing_dup.value = new_node.value;
+                        existing_dup.value_digest = new_node.value_digest;
+                        let left =
+                            Self::merge_map_trees(less_existing, new_node.left.take(), overlap);
+                        let right =
+                            Self::merge_map_trees(greater_existing, new_node.right.take(), overlap);
+                        existing_dup.left = left;
+                        existing_dup.right = right;
+                        existing_dup.update_hash();
+                        Some(existing_dup)
+                    } else {
+                        new_node.left =
+                            Self::merge_map_trees(less_existing, new_node.left.take(), overlap);
+                        new_node.right =
+                            Self::merge_map_trees(greater_existing, new_node.right.take(), overlap);
+                        new_node.update_hash();
+                        Some(new_node)
+                    }
+                }
+            }
+        }
+    }
+
+    fn split_map_three(
+        tree: MapLink<K, V, H, P>,
+        key: &K,
+    ) -> (
+        MapLink<K, V, H, P>,
+        MapLink<K, V, H, P>,
+        MapLink<K, V, H, P>,
+    ) {
+        match tree {
+            None => (None, None, None),
+            Some(mut node) => match key.cmp(&node.key) {
+                Ordering::Less => {
+                    let (less, equal, greater) = Self::split_map_three(node.left.take(), key);
+                    node.left = greater;
+                    node.update_hash();
+                    (less, equal, Some(node))
+                }
+                Ordering::Greater => {
+                    let (less, equal, greater) = Self::split_map_three(node.right.take(), key);
+                    node.right = less;
+                    node.update_hash();
+                    (Some(node), equal, greater)
+                }
+                Ordering::Equal => {
+                    let left = node.left.take();
+                    let right = node.right.take();
+                    (left, Some(node), right)
+                }
+            },
+        }
+    }
+}
+
+impl<K, V, H, P> Default for CMMap<K, V, H, P>
+where
+    K: Clone + Ord + Hash,
+    V: Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T, H, P> Default for CMTree<T, H, P>
 where
     T: Clone + Ord + Hash,
@@ -679,6 +1400,20 @@ where
     pub sibling_hash: HashOf<H>,
 }
 
+/// Authentication data for a single ancestor node in a [`MapProof`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MapProofNode<H>
+where
+    H: Digest + Clone,
+{
+    /// Digest of the parent node's key.
+    pub parent_key_digest: HashOf<H>,
+    /// Digest of the parent node's value.
+    pub parent_value_digest: HashOf<H>,
+    /// Sibling subtree hash encountered on the path to the root.
+    pub sibling_hash: HashOf<H>,
+}
+
 /// Membership or non-membership proof for a Cartesian Merkle Tree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof<H>
@@ -694,6 +1429,25 @@ where
     pub existence: bool,
     /// Digest used to demonstrate non-membership when [`Proof::existence`] is `false`.
     pub non_existence_key_digest: Option<HashOf<H>>,
+}
+
+/// Membership or non-membership proof for a [`CMMap`] entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MapProof<H>
+where
+    H: Digest + Clone,
+{
+    /// Path of ancestor nodes from the queried entry up to (but not including) the root.
+    pub prefix: Vec<MapProofNode<H>>,
+    /// Left and right child hashes for the queried entry or blocking neighbor.
+    pub suffix: [HashOf<H>; 2],
+    /// Indicates whether this proof represents membership (`true`) or non-membership
+    /// (`false`).
+    pub existence: bool,
+    /// Digest used to demonstrate non-membership when [`MapProof::existence`] is `false`.
+    pub non_existence_key_digest: Option<HashOf<H>>,
+    /// Digest of the value stored at the queried node or its neighbor.
+    pub value_digest: HashOf<H>,
 }
 
 impl<H> Proof<H>
@@ -743,6 +1497,54 @@ where
         let mut acc = calculate_node_hash::<H>(base_key, &self.suffix[0], &self.suffix[1]);
         for node in &self.prefix {
             acc = calculate_node_hash::<H>(&node.parent_key_digest, &acc, &node.sibling_hash);
+        }
+
+        &acc == expected_root
+    }
+}
+
+impl<H> MapProof<H>
+where
+    H: Digest + Clone,
+{
+    /// Verifies the proof against the provided key/value pair and root hash.
+    #[inline(always)]
+    pub fn verify<K, V>(&self, key: &K, value: Option<&V>, expected_root: &HashOf<H>) -> bool
+    where
+        K: Hash,
+        V: Hash,
+    {
+        let key_digest = hash_key::<K, H>(key);
+        let (base_key, base_value) = if self.existence {
+            let provided = match value {
+                Some(v) => v,
+                None => return false,
+            };
+            let hashed_value = hash_key::<V, H>(provided);
+            if hashed_value != self.value_digest {
+                return false;
+            }
+            (&key_digest, &self.value_digest)
+        } else {
+            if value.is_some() {
+                return false;
+            }
+            let neighbor = match self.non_existence_key_digest.as_ref() {
+                Some(d) => d,
+                None => return false,
+            };
+            (neighbor, &self.value_digest)
+        };
+
+        let mut acc =
+            calculate_map_node_hash::<H>(base_key, base_value, &self.suffix[0], &self.suffix[1]);
+        for node in &self.prefix {
+            acc = calculate_map_node_hash::<H>(
+                &node.parent_key_digest,
+                &node.parent_value_digest,
+                &acc,
+                &node.sibling_hash,
+            );
         }
 
         &acc == expected_root
@@ -826,6 +1628,27 @@ fn calculate_node_hash<H: Digest>(
 
     let mut hasher = H::new();
     hasher.update(key_digest.as_ref());
+    hasher.update(low.as_ref());
+    hasher.update(high.as_ref());
+    hasher.finalize()
+}
+
+#[inline(always)]
+fn calculate_map_node_hash<H: Digest>(
+    key_digest: &HashOf<H>,
+    value_digest: &HashOf<H>,
+    left: &HashOf<H>,
+    right: &HashOf<H>,
+) -> HashOf<H> {
+    let (low, high) = if left.as_ref() <= right.as_ref() {
+        (left, right)
+    } else {
+        (right, left)
+    };
+
+    let mut hasher = H::new();
+    hasher.update(key_digest.as_ref());
+    hasher.update(value_digest.as_ref());
     hasher.update(low.as_ref());
     hasher.update(high.as_ref());
     hasher.finalize()
@@ -1267,5 +2090,247 @@ mod tests {
         assert_eq!(tree.len(), len);
         let root_after = tree.root_hash();
         assert_eq!(root_before, root_after);
+    }
+
+    #[test]
+    fn map_insert_get_and_replace() {
+        let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+        assert!(map.insert(key(b"alice"), key(b"1")).is_none());
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(&key(b"alice")).unwrap(), &key(b"1"));
+        let replaced = map.insert(key(b"alice"), key(b"2")).unwrap();
+        assert_eq!(replaced, key(b"1"));
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(&key(b"alice")).unwrap(), &key(b"2"));
+    }
+
+    #[test]
+    fn map_remove_returns_value_and_updates_len() {
+        let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+        for (k, v) in [("alpha", "1"), ("beta", "2"), ("gamma", "3")] {
+            assert!(map.insert(key(k.as_bytes()), key(v.as_bytes())).is_none());
+        }
+        assert_eq!(map.len(), 3);
+        let removed = map.remove(&key(b"beta")).unwrap();
+        assert_eq!(removed, key(b"2"));
+        assert_eq!(map.len(), 2);
+        assert!(!map.contains_key(&key(b"beta")));
+    }
+
+    #[test]
+    fn map_membership_proof_verifies_for_key_value() {
+        let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+        map.insert(key(b"apple"), key(b"red"));
+        map.insert(key(b"banana"), key(b"yellow"));
+        map.insert(key(b"carrot"), key(b"orange"));
+
+        let root = map.root_hash();
+        let proof = map.generate_proof(&key(b"banana")).unwrap();
+        assert!(proof.existence);
+        assert!(proof.verify(&key(b"banana"), Some(&key(b"yellow")), &root));
+        assert!(!proof.verify(&key(b"banana"), Some(&key(b"green")), &root));
+    }
+
+    #[test]
+    fn map_non_membership_proof_verifies_without_value() {
+        let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+        for (k, v) in [("dog", "canine"), ("cat", "feline"), ("owl", "avian")] {
+            map.insert(key(k.as_bytes()), key(v.as_bytes()));
+        }
+        let root = map.root_hash();
+        let proof = map.generate_proof(&key(b"fox")).unwrap();
+        assert!(!proof.existence);
+        assert!(proof.verify::<Vec<u8>, Vec<u8>>(&key(b"fox"), None, &root));
+    }
+
+    #[test]
+    fn map_batch_insert_matches_sequential_inserts() {
+        let dataset: &[(&[u8], &[u8])] = &[
+            (b"alice", b"1"),
+            (b"bob", b"2"),
+            (b"carol", b"3"),
+            (b"dave", b"4"),
+            (b"erin", b"5"),
+        ];
+
+        let mut batch = CMMap::<Vec<u8>, Vec<u8>>::new();
+        let inserted = batch.insert_batch(dataset.iter().map(|&(k, v)| (key(k), key(v))));
+        assert_eq!(inserted, dataset.len());
+
+        let mut sequential = CMMap::<Vec<u8>, Vec<u8>>::new();
+        for &(k, v) in dataset.iter() {
+            sequential.insert(key(k), key(v));
+        }
+
+        assert_eq!(batch.len(), sequential.len());
+        assert_eq!(batch.root_hash(), sequential.root_hash());
+        assert_eq!(batch.get(&key(b"carol")).unwrap(), &key(b"3"));
+    }
+
+    #[test]
+    fn map_batch_insert_merges_with_existing_entries() {
+        let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+        for (k, v) in [("10", "one"), ("20", "two"), ("30", "three")] {
+            map.insert(key(k.as_bytes()), key(v.as_bytes()));
+        }
+        let len_before = map.len();
+        let inserted = map.insert_batch([
+            (key(b"05"), key(b"zero-five")),
+            (key(b"20"), key(b"two-new")),
+            (key(b"25"), key(b"two-five")),
+            (key(b"35"), key(b"three-five")),
+        ]);
+        assert_eq!(inserted, 3);
+        assert_eq!(map.len(), len_before + 3);
+        assert_eq!(map.get(&key(b"20")).unwrap(), &key(b"two-new"));
+        for key_str in ["05", "10", "20", "25", "30", "35"] {
+            assert!(map.contains_key(&key(key_str.as_bytes())));
+        }
+    }
+
+    #[test]
+    fn map_batch_insert_uses_last_value_for_duplicates() {
+        let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+        let inserted = map.insert_batch([
+            (key(b"alpha"), key(b"v1")),
+            (key(b"alpha"), key(b"v2")),
+            (key(b"beta"), key(b"v3")),
+            (key(b"beta"), key(b"v4")),
+        ]);
+        assert_eq!(inserted, 2);
+        assert_eq!(map.len(), 2);
+        assert_eq!(map.get(&key(b"alpha")).unwrap(), &key(b"v2"));
+        assert_eq!(map.get(&key(b"beta")).unwrap(), &key(b"v4"));
+    }
+
+    #[test]
+    fn map_batch_insert_returns_zero_when_all_keys_exist() {
+        let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+        for (k, v) in [("a", "1"), ("b", "2"), ("c", "3")] {
+            map.insert(key(k.as_bytes()), key(v.as_bytes()));
+        }
+        let len_before = map.len();
+        let root_before = map.root_hash();
+        let inserted = map.insert_batch([
+            (key(b"a"), key(b"new-1")),
+            (key(b"b"), key(b"new-2")),
+            (key(b"c"), key(b"new-3")),
+        ]);
+        assert_eq!(inserted, 0);
+        assert_eq!(map.len(), len_before);
+        assert_ne!(map.root_hash(), root_before);
+        assert_eq!(map.get(&key(b"a")).unwrap(), &key(b"new-1"));
+    }
+
+    #[test]
+    fn map_batch_insert_handles_empty_input() {
+        let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+        assert_eq!(
+            map.insert_batch(std::iter::empty::<(Vec<u8>, Vec<u8>)>()),
+            0
+        );
+        assert!(map.is_empty());
+        map.insert(key(b"alpha"), key(b"1"));
+        let len_before = map.len();
+        let inserted = map.insert_batch(std::iter::empty::<(Vec<u8>, Vec<u8>)>());
+        assert_eq!(inserted, 0);
+        assert_eq!(map.len(), len_before);
+    }
+
+    #[test]
+    fn map_batch_insert_accepts_unsorted_iterators() {
+        let dataset = [
+            (key(b"delta"), key(b"4")),
+            (key(b"alpha"), key(b"1")),
+            (key(b"charlie"), key(b"3")),
+            (key(b"bravo"), key(b"2")),
+            (key(b"alpha"), key(b"1b")),
+        ];
+        let mut batch = CMMap::<Vec<u8>, Vec<u8>>::new();
+        let inserted = batch.insert_batch(dataset.iter().cloned());
+        assert_eq!(inserted, 4);
+
+        let mut sequential = CMMap::<Vec<u8>, Vec<u8>>::new();
+        for (k, v) in dataset.into_iter() {
+            sequential.insert(k, v);
+        }
+        assert_eq!(batch.root_hash(), sequential.root_hash());
+        assert_eq!(batch.get(&key(b"alpha")).unwrap(), &key(b"1b"));
+    }
+
+    #[test]
+    fn map_contains_key_and_remove_missing() {
+        let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+        map.insert(key(b"alpha"), key(b"1"));
+        map.insert(key(b"beta"), key(b"2"));
+        assert!(map.contains_key(&key(b"alpha")));
+        assert!(!map.contains_key(&key(b"gamma")));
+        let len_before = map.len();
+        assert!(map.remove(&key(b"alpha")).is_some());
+        assert_eq!(map.len(), len_before - 1);
+        assert!(map.remove(&key(b"alpha")).is_none());
+        assert_eq!(map.len(), len_before - 1);
+        assert!(map.remove(&key(b"gamma")).is_none());
+    }
+
+    #[test]
+    fn map_deterministic_root_across_insertion_orders() {
+        let entries = [
+            ("delta", "4"),
+            ("alpha", "1"),
+            ("charlie", "3"),
+            ("bravo", "2"),
+            ("echo", "5"),
+        ];
+        let mut map_a = CMMap::<Vec<u8>, Vec<u8>>::new();
+        for (k, v) in entries.iter() {
+            map_a.insert(key(k.as_bytes()), key(v.as_bytes()));
+        }
+        let mut map_b = CMMap::<Vec<u8>, Vec<u8>>::new();
+        for (k, v) in entries.iter().rev() {
+            map_b.insert(key(k.as_bytes()), key(v.as_bytes()));
+        }
+        assert_eq!(map_a.len(), map_b.len());
+        assert_eq!(map_a.root_hash(), map_b.root_hash());
+    }
+
+    #[test]
+    fn map_proof_rejects_with_wrong_root() {
+        let mut map_a = CMMap::<Vec<u8>, Vec<u8>>::new();
+        let mut map_b = CMMap::<Vec<u8>, Vec<u8>>::new();
+        for (k, v) in [("one", "1"), ("two", "2"), ("three", "3")] {
+            let key_vec = key(k.as_bytes());
+            let val_vec = key(v.as_bytes());
+            map_a.insert(key_vec.clone(), val_vec.clone());
+            map_b.insert(key_vec, val_vec);
+        }
+        map_b.insert(key(b"extra"), key(b"value"));
+        let root_a = map_a.root_hash();
+        let root_b = map_b.root_hash();
+        let proof = map_a.generate_proof(&key(b"two")).unwrap();
+        assert!(proof.verify(&key(b"two"), Some(&key(b"2")), &root_a));
+        assert!(!proof.verify(&key(b"two"), Some(&key(b"2")), &root_b));
+    }
+
+    #[test]
+    fn map_large_insert_and_removals() {
+        const COUNT: u64 = 1_000;
+        let mut map = CMMap::<u64, u64>::new();
+        for i in 0..COUNT {
+            assert!(map.insert(i, i * 2).is_none());
+        }
+        assert_eq!(map.len() as u64, COUNT);
+        for i in (0..COUNT).step_by(2) {
+            assert_eq!(map.remove(&i), Some(i * 2));
+        }
+        assert_eq!(map.len() as u64, COUNT / 2);
+        assert!(map.contains_key(&(COUNT - 1)));
+        assert!(!map.contains_key(&COUNT));
+    }
+
+    #[test]
+    fn map_generate_proof_none_when_empty() {
+        let map = CMMap::<Vec<u8>, Vec<u8>>::new();
+        assert!(map.generate_proof(&key(b"any")).is_none());
     }
 }

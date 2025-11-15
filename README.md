@@ -29,6 +29,7 @@ and proofs remain compact.
 - 🧵 **No-std first** – uses `alloc` only; works in embedded and wasm contexts.
 - 🧩 **Pluggable hashers** – swap `Sha256` for any `Digest + Clone` such as `blake3` or `sha3`.
 - 📦 **Batch insertion** – amortize rotations by feeding entire slices to `insert_batch`.
+- 🗂️ **Key/value map** – use `CMMap` when you need authenticated values, not just membership.
 - 🧪 **Tested** – extensive unit, doc, and large-structure tests plus a CI pipeline covering
   `cargo fmt`, `clippy`, `doc`, and `test`.
 
@@ -84,6 +85,27 @@ let missing = b"not-here".to_vec();
 let proof = tree.generate_proof(&missing).unwrap();
 assert!(!proof.existence);
 assert!(proof.verify(&missing, &root));
+```
+
+## Key/value map
+
+```rust
+use cmtree::CMMap;
+
+let mut map = CMMap::<Vec<u8>, Vec<u8>>::new();
+map.insert_batch([
+    (b"alice".to_vec(), b"pubkey-alice".to_vec()),
+    (b"bob".to_vec(), b"pubkey-bob".to_vec()),
+]);
+
+let root = map.root_hash();
+let membership = map.generate_proof(&b"bob".to_vec()).unwrap();
+assert!(membership.existence);
+assert!(membership.verify(&b"bob".to_vec(), Some(&b"pubkey-bob".to_vec()), &root));
+
+let missing = map.generate_proof(&b"carol".to_vec()).unwrap();
+assert!(!missing.existence);
+assert!(missing.verify::<Vec<u8>, Vec<u8>>(&b"carol".to_vec(), None, &root));
 ```
 
 Proofs follow the definition in [*Cartesian Merkle Tree* (Chystiakov et al.,
