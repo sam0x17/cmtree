@@ -64,6 +64,7 @@ macro_rules! impl_priority_from_bytes {
 
 impl_priority_from_bytes!(u16, u32, u64, u128);
 
+#[derive(Clone)]
 struct Node<T, H, P>
 where
     T: Clone + Ord + Hash,
@@ -162,6 +163,27 @@ where
     hash: HashOf<H>,
     left: MapLink<K, V, H, P>,
     right: MapLink<K, V, H, P>,
+}
+
+impl<K, V, H, P> Clone for MapNode<K, V, H, P>
+where
+    K: Clone + Ord + Hash,
+    V: Clone + Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    fn clone(&self) -> Self {
+        Self {
+            key: self.key.clone(),
+            value: self.value.clone(),
+            key_digest: self.key_digest.clone(),
+            value_digest: self.value_digest.clone(),
+            priority: self.priority,
+            hash: self.hash.clone(),
+            left: self.left.clone(),
+            right: self.right.clone(),
+        }
+    }
 }
 
 impl<K, V, H, P> MapNode<K, V, H, P>
@@ -375,6 +397,20 @@ where
     size: usize,
 }
 
+impl<T, H, P> Clone for CMTree<T, H, P>
+where
+    T: Clone + Ord + Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            size: self.size,
+        }
+    }
+}
+
 /// Deterministic Cartesian Merkle Map storing key/value pairs with authenticated payloads.
 ///
 /// The map mirrors [`CMTree`] but extends each node with a hashed value, so every key has a
@@ -407,6 +443,21 @@ where
 {
     root: MapLink<K, V, H, P>,
     size: usize,
+}
+
+impl<K, V, H, P> Clone for CMMap<K, V, H, P>
+where
+    K: Clone + Ord + Hash,
+    V: Clone + Hash,
+    H: Digest + Clone,
+    P: Priority,
+{
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            size: self.size,
+        }
+    }
 }
 
 impl<T, H, P> CMTree<T, H, P>
